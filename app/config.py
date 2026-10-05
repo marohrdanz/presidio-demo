@@ -40,6 +40,7 @@ class Settings:
     spacy_model: str = field(default_factory=lambda: os.getenv("PHI_SPACY_MODEL", "en_core_web_lg"))
     score_threshold: float = field(default_factory=lambda: float(os.getenv("PHI_SCORE_THRESHOLD", "0.5")))
     entities: list[str] = field(default_factory=lambda: _env_list("PHI_ENTITIES", DEFAULT_PHI_ENTITIES))
+    check_columns: bool = field(default_factory=lambda: os.getenv("PHI_CHECK_COLUMNS", "true").lower() in ("1", "true", "yes"))
     max_upload_bytes: int = field(default_factory=lambda: int(os.getenv("PHI_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))))
 
 

@@ -1,6 +1,10 @@
-"""Extract plain text from uploaded files so it can be scanned."""
+"""Extract plain text, and any column headings, from uploaded files."""
 
+import csv
 import io
+import json
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import PurePath
 
 from docx import Document
@@ -18,7 +22,14 @@ class ExtractionError(Exception):
     pass
 
 
-def extract_text(filename: str, data: bytes) -> str:
+@dataclass
+class Extracted:
+    text: str
+    # Column heading (or JSON key) -> number of non-empty values under it.
+    columns: Counter = field(default_factory=Counter)
+
+
+def extract(filename: str, data: bytes) -> Extracted:
     ext = PurePath(filename or "").suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise UnsupportedFileType(
@@ -26,10 +37,15 @@ def extract_text(filename: str, data: bytes) -> str:
         )
     try:
         if ext == ".pdf":
-            return _pdf_text(data)
+            return Extracted(_pdf_text(data))
         if ext == ".docx":
-            return _docx_text(data)
-        return _decode(data)
+            return _docx(data)
+        text = _decode(data)
+        if ext in (".csv", ".tsv"):
+            return Extracted(text, _delimited_columns(text, "\t" if ext == ".tsv" else ","))
+        if ext == ".json":
+            return Extracted(text, _json_columns(text))
+        return Extracted(text)
     except (UnsupportedFileType, ExtractionError):
         raise
     except Exception as exc:  # malformed PDFs/DOCX raise a variety of errors
@@ -55,13 +71,63 @@ def _pdf_text(data: bytes) -> str:
     return text
 
 
-def _docx_text(data: bytes) -> str:
+def _docx(data: bytes) -> Extracted:
     doc = Document(io.BytesIO(data))
     parts = [p.text for p in doc.paragraphs]
+    columns: Counter = Counter()
     for table in doc.tables:
-        for row in table.rows:
-            parts.append("\t".join(cell.text for cell in row.cells))
+        rows = [[cell.text for cell in row.cells] for row in table.rows]
+        parts.extend("\t".join(row) for row in rows)
+        columns.update(_count_columns(rows))
     for section in doc.sections:
         parts.extend(p.text for p in section.header.paragraphs)
         parts.extend(p.text for p in section.footer.paragraphs)
-    return "\n".join(parts)
+    return Extracted("\n".join(parts), columns)
+
+
+def _delimited_columns(text: str, delimiter: str) -> Counter:
+    try:
+        return _count_columns(csv.reader(io.StringIO(text), delimiter=delimiter))
+    except csv.Error:
+        # Not well-formed CSV; the text is still scanned by Presidio.
+        return Counter()
+
+
+def _count_columns(rows) -> Counter:
+    """Treat the first row as headings and count non-empty values under each."""
+    rows = iter(rows)
+    header = next(rows, None)
+    counts: Counter = Counter({h.strip(): 0 for h in header or [] if h.strip()})
+    for row in rows:
+        for heading, value in zip(header, row):
+            if heading.strip() and value.strip():
+                counts[heading.strip()] += 1
+    return counts
+
+
+def _json_columns(text: str) -> Counter:
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return Counter()
+    counts: Counter = Counter()
+    stack = [doc]
+    while stack:  # iterative, so deeply nested input can't hit the recursion limit
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, (dict, list)):
+                    stack.append(value)
+                    filled = isinstance(value, list) and any(
+                        not isinstance(v, (dict, list)) and _filled(v) for v in value
+                    )
+                else:
+                    filled = _filled(value)
+                counts[str(key)] += int(filled)
+        elif isinstance(node, list):
+            stack.extend(v for v in node if isinstance(v, (dict, list)))
+    return counts
+
+
+def _filled(value) -> bool:
+    return value is not None and str(value).strip() != ""

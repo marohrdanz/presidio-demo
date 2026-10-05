@@ -1,6 +1,5 @@
 """Presidio-backed PHI scanner."""
 
-from collections import Counter
 from dataclasses import dataclass
 
 from presidio_analyzer import AnalyzerEngine
@@ -27,9 +26,6 @@ class Finding:
 class ScanResult:
     contains_phi: bool
     findings: list[Finding]
-
-    def summary(self) -> dict[str, int]:
-        return dict(Counter(f.entity_type for f in self.findings))
 
 
 class PhiScanner:

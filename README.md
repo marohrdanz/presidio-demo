@@ -7,7 +7,8 @@ A small FastAPI service that scans uploaded files for **protected health informa
 1. A client `POST`s a file to `/scan` (multipart form field `file`).
 2. Text is extracted from the file (plain text formats, PDF, DOCX).
 3. Presidio's `AnalyzerEngine` (spaCy NER + pattern recognizers) scans the text for PHI entities.
-4. If anything scores at or above the threshold, the file is rejected with **HTTP 422**. Otherwise it's accepted with **HTTP 200**.
+4. For tabular files, the column headings are checked too (see [Column heading check](#column-heading-check)).
+5. If anything scores at or above the threshold, or a column heading names a PHI field, the file is rejected with **HTTP 422**. Otherwise it's accepted with **HTTP 200**.
 
 The response lists the entity types, confidence scores and character offsets that were found. **The matched text is never echoed back**, so the scanner's response doesn't leak PHI into client logs.
 
@@ -21,6 +22,18 @@ The default entity list is aimed at HIPAA Safe Harbor identifiers:
 | Custom (`app/recognizers.py`) | `MEDICAL_RECORD_NUMBER`, `HEALTH_PLAN_ID` (member/policy IDs, Medicare MBI), `DATE_OF_BIRTH` |
 
 Presidio's generic `DATE_TIME` and `LOCATION` entities are **off by default**: they fire on almost any prose ("Monday", "2024", "Denver") and would reject nearly every file. Dates of birth are caught by the targeted `DATE_OF_BIRTH` recognizer instead. You can turn them back on with `PHI_ENTITIES` if you want a stricter gate.
+
+### Column heading check
+
+Presidio scans a CSV as flat text, so a value like `1971-04-12` under a `dob` heading is just a bare date by the time it reaches the analyzer. A CSV of birth dates with no other identifiers would otherwise be accepted. To close that gap, `app/columns.py` also looks at the headings of CSV/TSV files, Word tables, and JSON keys:
+
+- **Strong headings** name a direct identifier (`dob`, `ssn`, `mrn`, `patient_name`, `last_name`, `member_id`, `phone`, `email`, ...). Any populated column with one of these headings causes a rejection.
+- **Weak headings** are only identifying in a health context (`name`, `patient`, `address`, `zip`, `admit_date`, `age`, ...). They cause a rejection only if the file also has a populated clinical column (`diagnosis`, `icd10`, `medication`, `allergies`, ...). So `name,sku,price` passes, but `name,diagnosis` doesn't.
+- **Empty columns don't count**, so a template with just a heading row is accepted.
+
+Headings are matched on normalised tokens (`patientDOB`, `Patient DOB` and `patient_dob` all match `dob`). A match may only be followed by suffixes like `number`, `id` or `no`, so `phone_number` matches but `phone_model` doesn't.
+
+Column findings appear in the response with `"entity_type": "PHI_COLUMN"` and the heading in `column`. Headings are labels, not values, so echoing them doesn't leak PHI. Edit the lists in `app/columns.py` to match your own schemas, or turn the check off with `PHI_CHECK_COLUMNS=false`.
 
 ## Running locally
 
@@ -70,6 +83,7 @@ Supported extensions: `.txt .csv .tsv .json .md .xml .html .htm .log .hl7 .yaml 
 | --- | --- | --- |
 | `PHI_SCORE_THRESHOLD` | `0.5` | Minimum Presidio confidence for a finding to count. Lower is stricter. |
 | `PHI_ENTITIES` | see above | Comma-separated entity types that cause rejection. |
+| `PHI_CHECK_COLUMNS` | `true` | Also reject tabular files whose column headings name PHI fields. |
 | `PHI_SPACY_MODEL` | `en_core_web_lg` | spaCy model used for NER (must be installed). |
 | `PHI_MAX_UPLOAD_BYTES` | `10485760` | Max upload size (10 MiB). |
 

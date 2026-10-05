@@ -1,5 +1,6 @@
 """FastAPI service that rejects uploaded files containing suspected PHI."""
 
+from collections import Counter
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -7,16 +8,21 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.columns import check_columns
 from app.config import get_settings
-from app.extract import ExtractionError, UnsupportedFileType, extract_text
+from app.extract import ExtractionError, UnsupportedFileType, extract
 from app.scanner import PhiScanner
 
 
 class FindingOut(BaseModel):
     entity_type: str
     score: float
-    start: int
-    end: int
+    # Character offsets for text findings; None for column-heading findings.
+    start: int | None = None
+    end: int | None = None
+    # The offending heading, for PHI_COLUMN findings. Headings are labels
+    # like "dob", not values, so echoing them doesn't leak PHI.
+    column: str | None = None
 
 
 class ScanResponse(BaseModel):
@@ -70,19 +76,26 @@ async def scan_file(request: Request, file: UploadFile = File(...)):
 
     filename = file.filename or ""
     try:
-        text = await run_in_threadpool(extract_text, filename, data)
+        extracted = await run_in_threadpool(extract, filename, data)
     except UnsupportedFileType as exc:
         raise HTTPException(415, str(exc)) from exc
     except ExtractionError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    result = await run_in_threadpool(request.app.state.scanner.scan, text)
+    result = await run_in_threadpool(request.app.state.scanner.scan, extracted.text)
+    findings = [FindingOut(**vars(f)) for f in result.findings]
+    if settings.check_columns:
+        findings += [
+            FindingOut(entity_type="PHI_COLUMN", score=1.0 if c.strength == "strong" else 0.8, column=c.column)
+            for c in check_columns(extracted.columns)
+        ]
+    contains_phi = bool(findings)
     body = ScanResponse(
         filename=filename,
-        status="rejected" if result.contains_phi else "accepted",
-        contains_phi=result.contains_phi,
-        entity_counts=result.summary(),
-        findings=[FindingOut(**vars(f)) for f in result.findings],
+        status="rejected" if contains_phi else "accepted",
+        contains_phi=contains_phi,
+        entity_counts=dict(Counter(f.entity_type for f in findings)),
+        findings=findings,
     )
-    code = 422 if result.contains_phi else 200
+    code = 422 if contains_phi else 200
     return JSONResponse(status_code=code, content=body.model_dump())
