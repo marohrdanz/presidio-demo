@@ -1,5 +1,7 @@
 # presidio-demo: PHI upload scanner
 
+:warning: **Warning**: This is just a quick, untested, ai-generated mockup of ideas :warning:
+
 A small FastAPI service that scans uploaded files for **protected health information (PHI)** using [Microsoft Presidio](https://microsoft.github.io/presidio/) and **rejects** any file that contains suspected PHI.
 
 ## How it works
