@@ -23,6 +23,11 @@ class FindingOut(BaseModel):
     # The offending heading, for PHI_COLUMN findings. Headings are labels
     # like "dob", not values, so echoing them doesn't leak PHI.
     column: str | None = None
+    # For PHI_COLUMN findings: "identifier_heading", or the HIPAA Safe Harbor
+    # value rule broken (e.g. "zip_more_than_3_digits"), and how many values
+    # are affected. The values themselves are never included.
+    rule: str | None = None
+    count: int | None = None
 
 
 class ScanResponse(BaseModel):
@@ -86,7 +91,13 @@ async def scan_file(request: Request, file: UploadFile = File(...)):
     findings = [FindingOut(**vars(f)) for f in result.findings]
     if settings.check_columns:
         findings += [
-            FindingOut(entity_type="PHI_COLUMN", score=1.0 if c.strength == "strong" else 0.8, column=c.column)
+            FindingOut(
+                entity_type="PHI_COLUMN",
+                score=1.0 if c.strength == "strong" else 0.8,
+                column=c.column,
+                rule=c.rule,
+                count=c.count,
+            )
             for c in check_columns(extracted.columns)
         ]
     contains_phi = bool(findings)

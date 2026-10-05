@@ -3,7 +3,6 @@
 import csv
 import io
 import json
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import PurePath
 
@@ -22,11 +21,14 @@ class ExtractionError(Exception):
     pass
 
 
+Columns = dict[str, list[str]]
+
+
 @dataclass
 class Extracted:
     text: str
-    # Column heading (or JSON key) -> number of non-empty values under it.
-    columns: Counter = field(default_factory=Counter)
+    # Column heading (or JSON key) -> the non-empty values under it.
+    columns: Columns = field(default_factory=dict)
 
 
 def extract(filename: str, data: bytes) -> Extracted:
@@ -74,59 +76,63 @@ def _pdf_text(data: bytes) -> str:
 def _docx(data: bytes) -> Extracted:
     doc = Document(io.BytesIO(data))
     parts = [p.text for p in doc.paragraphs]
-    columns: Counter = Counter()
+    columns: Columns = {}
     for table in doc.tables:
         rows = [[cell.text for cell in row.cells] for row in table.rows]
         parts.extend("\t".join(row) for row in rows)
-        columns.update(_count_columns(rows))
+        _merge(columns, _table_columns(rows))
     for section in doc.sections:
         parts.extend(p.text for p in section.header.paragraphs)
         parts.extend(p.text for p in section.footer.paragraphs)
     return Extracted("\n".join(parts), columns)
 
 
-def _delimited_columns(text: str, delimiter: str) -> Counter:
+def _delimited_columns(text: str, delimiter: str) -> Columns:
     try:
-        return _count_columns(csv.reader(io.StringIO(text), delimiter=delimiter))
+        return _table_columns(csv.reader(io.StringIO(text), delimiter=delimiter))
     except csv.Error:
         # Not well-formed CSV; the text is still scanned by Presidio.
-        return Counter()
+        return {}
 
 
-def _count_columns(rows) -> Counter:
-    """Treat the first row as headings and count non-empty values under each."""
+def _table_columns(rows) -> Columns:
+    """Treat the first row as headings and collect the non-empty values under each."""
     rows = iter(rows)
-    header = next(rows, None)
-    counts: Counter = Counter({h.strip(): 0 for h in header or [] if h.strip()})
+    header = [h.strip() for h in next(rows, None) or []]
+    columns: Columns = {h: [] for h in header if h}
     for row in rows:
         for heading, value in zip(header, row):
-            if heading.strip() and value.strip():
-                counts[heading.strip()] += 1
-    return counts
+            if heading and value.strip():
+                columns[heading].append(value.strip())
+    return columns
 
 
-def _json_columns(text: str) -> Counter:
+def _json_columns(text: str) -> Columns:
     try:
         doc = json.loads(text)
     except ValueError:
-        return Counter()
-    counts: Counter = Counter()
+        return {}
+    columns: Columns = {}
     stack = [doc]
     while stack:  # iterative, so deeply nested input can't hit the recursion limit
         node = stack.pop()
         if isinstance(node, dict):
             for key, value in node.items():
+                values = columns.setdefault(str(key), [])
                 if isinstance(value, (dict, list)):
                     stack.append(value)
-                    filled = isinstance(value, list) and any(
-                        not isinstance(v, (dict, list)) and _filled(v) for v in value
-                    )
-                else:
-                    filled = _filled(value)
-                counts[str(key)] += int(filled)
+                    if isinstance(value, list):
+                        values.extend(str(v).strip() for v in value if not isinstance(v, (dict, list)) and _filled(v))
+                elif _filled(value):
+                    values.append(str(value).strip())
         elif isinstance(node, list):
             stack.extend(v for v in node if isinstance(v, (dict, list)))
-    return counts
+    return columns
+
+
+def _merge(into: Columns, other: Columns) -> None:
+    for heading, values in other.items():
+        into.setdefault(heading, []).extend(values)
 
 
 def _filled(value) -> bool:

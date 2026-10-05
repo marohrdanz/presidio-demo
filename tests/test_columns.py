@@ -1,6 +1,5 @@
 import io
 import json
-from collections import Counter
 
 import pytest
 from docx import Document
@@ -35,38 +34,38 @@ def test_unrelated_headings(heading):
 
 
 def test_empty_column_is_ignored():
-    assert check_columns(Counter({"dob": 0, "visit_id": 3})) == []
+    assert check_columns({"dob": [], "visit_id": ["V1", "V2", "V3"]}) == []
 
 
 def test_weak_column_needs_health_context():
-    assert check_columns(Counter({"name": 5, "price": 5})) == []
-    flagged = check_columns(Counter({"name": 5, "diagnosis": 5}))
+    assert check_columns({"name": ["Widget"], "price": ["9.99"]}) == []
+    flagged = check_columns({"name": ["Maria"], "diagnosis": ["I10"]})
     assert [f.column for f in flagged] == ["name"]
 
 
 def test_health_context_column_must_be_populated():
-    assert check_columns(Counter({"name": 5, "diagnosis": 0})) == []
+    assert check_columns({"name": ["Maria"], "diagnosis": []}) == []
 
 
-def test_csv_counts_values_per_heading():
+def test_csv_collects_values_per_heading():
     data = b"visit_id,dob,notes\nV1,1971-04-10,\nV2,,\n"
-    assert extract("x.csv", data).columns == Counter({"visit_id": 2, "dob": 1, "notes": 0})
+    assert extract("x.csv", data).columns == {"visit_id": ["V1", "V2"], "dob": ["1971-04-10"], "notes": []}
 
 
 def test_tsv_uses_tab_delimiter():
-    assert extract("x.tsv", b"mrn\tdx\n7712093\tI10\n").columns == Counter({"mrn": 1, "dx": 1})
+    assert extract("x.tsv", b"mrn\tdx\n7712093\tI10\n").columns == {"mrn": ["7712093"], "dx": ["I10"]}
 
 
 def test_json_keys_are_columns():
     doc = {"patients": [{"dob": "1971-04-10", "notes": None}, {"dob": "1980-01-01", "tags": ["a"]}]}
     cols = extract("x.json", json.dumps(doc).encode()).columns
-    assert cols["dob"] == 2
-    assert cols["notes"] == 0
-    assert cols["tags"] == 1
+    assert sorted(cols["dob"]) == ["1971-04-10", "1980-01-01"]
+    assert cols["notes"] == []
+    assert cols["tags"] == ["a"]
 
 
 def test_invalid_json_has_no_columns():
-    assert extract("x.json", b"{not json").columns == Counter()
+    assert extract("x.json", b"{not json").columns == {}
 
 
 # --- end to end -----------------------------------------------------------

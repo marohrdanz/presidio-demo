@@ -5,12 +5,17 @@ Presidio scans a CSV as flat text, so a value like ``1971-04-12`` under a
 check looks at the headings themselves (CSV/TSV, Word tables, JSON keys).
 
 A column only counts if it actually holds values, so an empty template with
-just a heading row is still accepted.
+just a heading row is still accepted. Zip, age and date columns are checked
+value by value against the Safe Harbor rules in safe_harbor.py instead of
+being rejected on their heading alone.
 """
 
-import re
-from collections import Counter
 from dataclasses import dataclass
+from datetime import date
+
+from app.extract import Columns
+from app.headings import contains, tokens
+from app.safe_harbor import check_values, column_kind
 
 # Headings that name a direct identifier. Each entry is a run of tokens that
 # must appear contiguously in the normalised heading ("patient_dob" and
@@ -51,36 +56,33 @@ ALLOWED_SUFFIX = {"number", "num", "no", "nbr", "id", "code", "value", "address"
 class ColumnFinding:
     column: str
     strength: str  # "strong" | "weak"
-
-
-def tokens(heading: str) -> list[str]:
-    heading = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", heading)  # camelCase -> camel_Case
-    return [t for t in re.split(r"[^a-z0-9]+", heading.lower()) if t]
-
-
-def _matches(toks: list[str], pattern: tuple[str, ...]) -> bool:
-    n = len(pattern)
-    for i in range(len(toks) - n + 1):
-        if tuple(toks[i : i + n]) == pattern and all(t in ALLOWED_SUFFIX for t in toks[i + n :]):
-            return True
-    return False
+    rule: str  # "identifier_heading", or the Safe Harbor value rule broken
+    count: int  # number of values in the column (or breaking the rule)
 
 
 def classify(heading: str) -> str | None:
     toks = tokens(heading)
-    if any(_matches(toks, p) for p in STRONG):
+    if any(contains(toks, p, ALLOWED_SUFFIX) for p in STRONG):
         return "strong"
-    if any(_matches(toks, p) for p in WEAK):
+    if any(contains(toks, p, ALLOWED_SUFFIX) for p in WEAK):
         return "weak"
     return None
 
 
-def check_columns(columns: Counter) -> list[ColumnFinding]:
-    populated = [c for c, n in columns.items() if n > 0]
+def check_columns(columns: Columns, today: date | None = None) -> list[ColumnFinding]:
+    populated = {c: v for c, v in columns.items() if v}
     clinical = any(HEALTH_CONTEXT.intersection(tokens(c)) for c in populated)
     findings = []
-    for column in populated:
+    for column, values in populated.items():
         strength = classify(column)
-        if strength == "strong" or (strength == "weak" and clinical):
-            findings.append(ColumnFinding(column, strength))
+        kind = column_kind(column)
+        if kind and (strength == "strong" or clinical):
+            # Zip, age and date columns are allowed at Safe Harbor precision,
+            # so their values decide rather than the heading alone.
+            findings += [
+                ColumnFinding(column, strength or "weak", v.rule, v.count)
+                for v in check_values(kind, values, today)
+            ]
+        elif strength == "strong" or (strength == "weak" and clinical):
+            findings.append(ColumnFinding(column, strength, "identifier_heading", len(values)))
     return findings

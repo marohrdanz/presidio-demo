@@ -30,12 +30,32 @@ Presidio's generic `DATE_TIME` and `LOCATION` entities are **off by default**: t
 Presidio scans a CSV as flat text, so a value like `1971-04-12` under a `dob` heading is just a bare date by the time it reaches the analyzer. A CSV of birth dates with no other identifiers would otherwise be accepted. To close that gap, `app/columns.py` also looks at the headings of CSV/TSV files, Word tables, and JSON keys:
 
 - **Strong headings** name a direct identifier (`dob`, `ssn`, `mrn`, `patient_name`, `last_name`, `member_id`, `phone`, `email`, ...). Any populated column with one of these headings causes a rejection.
-- **Weak headings** are only identifying in a health context (`name`, `patient`, `address`, `zip`, `admit_date`, `age`, ...). They cause a rejection only if the file also has a populated clinical column (`diagnosis`, `icd10`, `medication`, `allergies`, ...). So `name,sku,price` passes, but `name,diagnosis` doesn't.
+- **Weak headings** are only identifying in a health context (`name`, `patient`, `address`, `city`, ...). They cause a rejection only if the file also has a populated clinical column (`diagnosis`, `icd10`, `medication`, `allergies`, ...). So `name,sku,price` passes, but `name,diagnosis` doesn't.
+- **Zip, age and date columns** are checked value by value against the Safe Harbor rules below, rather than rejected on their heading.
 - **Empty columns don't count**, so a template with just a heading row is accepted.
 
 Headings are matched on normalised tokens (`patientDOB`, `Patient DOB` and `patient_dob` all match `dob`). A match may only be followed by suffixes like `number`, `id` or `no`, so `phone_number` matches but `phone_model` doesn't.
 
-Column findings appear in the response with `"entity_type": "PHI_COLUMN"` and the heading in `column`. Headings are labels, not values, so echoing them doesn't leak PHI. Edit the lists in `app/columns.py` to match your own schemas, or turn the check off with `PHI_CHECK_COLUMNS=false`.
+Column findings appear in the response with `"entity_type": "PHI_COLUMN"`, the heading in `column`, the reason in `rule` (`identifier_heading` or one of the Safe Harbor rules below) and the number of affected values in `count`. Headings are labels, not values, so echoing them doesn't leak PHI. Edit the lists in `app/columns.py` to match your own schemas, or turn the check off with `PHI_CHECK_COLUMNS=false`.
+
+### Safe Harbor value rules
+
+HIPAA's Safe Harbor method doesn't ban zip codes, ages or dates outright; it bans them above a certain precision. `app/safe_harbor.py` checks the values in columns recognised by heading:
+
+| Column kind | Example headings | Allowed | Rejected (`rule`) |
+| --- | --- | --- | --- |
+| Zip code | `zip`, `zip_code`, `postal_code`, `zip3` | First 3 digits (`803`, `803xx`) | 4+ digits (`zip_more_than_3_digits`); a 3-digit prefix covering 20,000 or fewer people, which must be `000` (`restricted_zip3`) |
+| Age | `age`, `age_at_admission` | 0-89, or a grouped value like `90+` | Over 89 (`age_over_89`) |
+| Birth year | `birth_year`, `yob` | Years implying age 89 or under | Years implying age over 89 (`birth_year_implies_age_over_89`) |
+| Birth date | `dob`, `date_of_birth` | Year only, same age rule as birth year | Anything more specific than a year (`date_more_specific_than_year`) |
+| Event date | `admit_date`, `discharge_date`, `dos`, `visit_date`, `date_of_death` | Year only | Anything more specific than a year (`date_more_specific_than_year`) |
+
+How these rules apply:
+
+- **Date checks are conservative.** Any value with digits that isn't a bare 4-digit year counts as too specific, including `2024-01`, `20240105` and Excel serial dates. Values with no digits (`unknown`, `N/A`) pass.
+- **Birth dates are checked in every file.** Zip, age, birth-year and event-date columns are checked only in clinical files, the same rule as weak headings.
+- **Restricted zip prefixes:** the list in `RESTRICTED_ZIP3` is HHS's list based on 2000 Census data. Review it against current Census figures before relying on it.
+- **Free text isn't covered.** These rules apply to table columns only. Dates and zips in free text aren't checked.
 
 ## Running locally
 
@@ -104,3 +124,4 @@ This is a screening tool, not a compliance guarantee. Automated detection has bo
 - **Free-text names** are found by spaCy NER, which can miss unusual names or flag non-patient names (e.g. a doctor's or author's name).
 - **Format-specific identifiers** (MRNs, member IDs) vary by organization. Tune the patterns in `app/recognizers.py` to match your own systems.
 - Other formats (XLSX, HL7 parsing, DICOM metadata, images) are not handled.
+- **No uniqueness check.** A file can follow every Safe Harbor value rule and still single people out, e.g. one row in a small dataset with a rare diagnosis. A k-anonymity check on quasi-identifier columns is not implemented yet.
