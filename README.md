@@ -67,6 +67,10 @@ $ curl -F file=@note.txt http://localhost:8000/scan
 $ curl -F file=@retro.txt http://localhost:8000/scan
 {"filename":"retro.txt","status":"accepted","contains_phi":false,"entity_counts":{},"findings":[]}
 # HTTP 200
+
+## example using demo data
+curl -X POST -F file=@demo_data/synthetic_phi/quasi_identifiers.csv \
+     http://localhost:8000/scan | jq .
 ```
 
 | Status | Meaning |
